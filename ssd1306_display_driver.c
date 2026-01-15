@@ -53,11 +53,27 @@
 #define CMD_SET_COM_SCAN_MODE 0xC8
 #define CMD_SET_CHARGE_PUMP 0x8D
 
+#define CMD_DISPLAY_OFF                     0xAE
+#define CMD_SET_DISPLAY_CLOCK_DIV_OSC_FREQ  0xD5
+#define CMD_SET_MULTIPLEX_RATIO             0xA8
+#define CMD_SET_DISPLAY_OFFSET              0xD3
+#define CMD_SET_DISPLAY_START_LINE          0x40
+#define CMD_SET_MEMORY_ADDR_MODE            0x20
+#define CMD_SET_COLUMN_ADDR_LOWER           0x00
+#define CMD_SET_COLUMN_ADDR_HIGHER          0x10
+#define CMD_SET_COM_PINS_HW_CONFIG          0xDA
+#define CMD_SET_CONTRAST_CONTROL            0x81
+#define CMD_SET_PRECHARGE_PERIOD            0xD9
+#define CMD_SET_VCOMH_DESELECT_LEVEL        0xDB
+#define CMD_ENTIRE_DISPLAY_RAM_CONTINUE     0xA4
+#define CMD_NORMAL_DISPLAY                  0xA6
+#define CMD_INTERNAL_IREF_SELECT            0xAD
 // TODO: let's change name, since also non SPI display are supported now
 struct SPI
 {
     term i2c_host;
     bool is_sh1106;
+    bool is_ssd1315;
     Context *ctx;
 };
 
@@ -182,6 +198,7 @@ static void display_init(Context *ctx, term opts)
     char *compat_string = interop_term_to_string(compat_value_term, &str_ok);
     if (str_ok && compat_string) {
         spi->is_sh1106 = !strcmp(compat_string, "sino-wealth,sh1106");
+        spi->is_ssd1315 = !strcmp(compat_string, "solomon-systech,ssd1315");
         free(compat_string);
     } else {
         return;
@@ -207,20 +224,99 @@ static void display_init(Context *ctx, term opts)
 
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, (I2C_ADDRESS << 1) | I2C_MASTER_WRITE, true);
+    // CTRL_BYTE_CMD_STREAM is common for both SSD1315 and SSD1306 initialization sequences.
     i2c_master_write_byte(cmd, CTRL_BYTE_CMD_STREAM, true);
 
-    i2c_master_write_byte(cmd, CMD_SET_CHARGE_PUMP, true);
-    i2c_master_write_byte(cmd, 0x14, true);
+    if (spi->is_ssd1315) {
+        // === SSD1315 SPECIFIC INIT (Refined Sequence with Macros, Datasheet Defaults, and your choices) ===
 
-    i2c_master_write_byte(cmd, CMD_SET_SEGMENT_REMAP, true);
-    i2c_master_write_byte(cmd, CMD_SET_COM_SCAN_MODE, true);
+        // 1. Display OFF (Sleep Mode)
+        i2c_master_write_byte(cmd, CMD_DISPLAY_OFF, true); // 0xAE
 
-    if (invert) {
-        i2c_master_write_byte(cmd, CMD_DISPLAY_INVERTED, true);
+        // 2. Set Display Clock Divide Ratio / Oscillator Frequency
+        i2c_master_write_byte(cmd, CMD_SET_DISPLAY_CLOCK_DIV_OSC_FREQ, true); // 0xD5
+        i2c_master_write_byte(cmd, 0x80, true); // Datasheet default: D=1, Fosc default (changed from 0x90)
+
+        // 3. Set Multiplex Ratio
+        i2c_master_write_byte(cmd, CMD_SET_MULTIPLEX_RATIO, true); // 0xA8
+        i2c_master_write_byte(cmd, 0x3F, true); // 1/64 duty cycle for 128x64 display
+
+        // 4. Set Display Offset
+        i2c_master_write_byte(cmd, CMD_SET_DISPLAY_OFFSET, true); // 0xD3
+        i2c_master_write_byte(cmd, 0x00, true); // No vertical offset
+
+        // 5. Set Display Start Line
+        i2c_master_write_byte(cmd, CMD_SET_DISPLAY_START_LINE, true); // 0x40 (Start line 0)
+
+        // 6. Set Memory Addressing Mode (CRITICAL for do_update)
+        i2c_master_write_byte(cmd, CMD_SET_MEMORY_ADDR_MODE, true); // 0x20
+        i2c_master_write_byte(cmd, 0x02, true); // Page Addressing Mode
+
+        // 7. Set Column Address to 0 (for Page Addressing Mode, ensures drawing starts at beginning of row)
+        i2c_master_write_byte(cmd, CMD_SET_COLUMN_ADDR_LOWER, true);  // 0x00
+        i2c_master_write_byte(cmd, CMD_SET_COLUMN_ADDR_HIGHER, true); // 0x10
+
+        // 8. Set Segment Remap
+        // Try datasheet default first. If display is mirrored, switch to CMD_SET_SEGMENT_REMAP (0xA1).
+        i2c_master_write_byte(cmd, 0xA0, true); // Datasheet default: Segment 0 to Column 0 (changed from 0xA1)
+
+        // 9. Set COM Output Scan Direction
+        // Try datasheet default first. If display is upside down, switch to CMD_SET_COM_SCAN_MODE (0xC8).
+        i2c_master_write_byte(cmd, 0xC0, true); // Datasheet default: Scan from COM0 to COM[N-1] (changed from 0xC8)
+
+        // 10. Set COM Pins Hardware Configuration
+        i2c_master_write_byte(cmd, CMD_SET_COM_PINS_HW_CONFIG, true); // 0xDA
+        i2c_master_write_byte(cmd, 0x12, true); // Alternative COM pin config, disable Left/Right remap (common for 128x64)
+
+        // 11. Set Contrast Control
+        i2c_master_write_byte(cmd, CMD_SET_CONTRAST_CONTROL, true); // 0x81
+        i2c_master_write_byte(cmd, 0x7F, true); // Mid-range contrast
+
+        // 12. Set Pre-charge Period
+        i2c_master_write_byte(cmd, CMD_SET_PRECHARGE_PERIOD, true); // 0xD9
+        i2c_master_write_byte(cmd, 0x22, true); // Datasheet default (Phase 1=4, Phase 2=4) (retained your 0x22)
+        // If still glitches/dim, try 0xF1 (Phase 1=15, Phase 2=1) which is common for good brightness
+
+        // 13. Set VCOMH Deselect Level
+        i2c_master_write_byte(cmd, CMD_SET_VCOMH_DESELECT_LEVEL, true); // 0xDB
+        i2c_master_write_byte(cmd, 0x20, true); // Datasheet default: ~0.77*VCC (changed from 0x30)
+
+        // 14. Internal IREF Selection (SSD1315 SPECIFIC!)
+        i2c_master_write_byte(cmd, CMD_INTERNAL_IREF_SELECT, true); // 0xAD
+        i2c_master_write_byte(cmd, 0x10, true); // Enable internal IREF, 19uA setting
+
+        // 15. Set Charge Pump
+        i2c_master_write_byte(cmd, CMD_SET_CHARGE_PUMP, true); // 0x8D
+        i2c_master_write_byte(cmd, 0x14, true); // Enable charge pump (7.5V setting)
+
+        // 16. Entire Display ON (Resume to GDDRAM content)
+        i2c_master_write_byte(cmd, CMD_ENTIRE_DISPLAY_RAM_CONTINUE, true); // 0xA4
+
+        // 17. Normal / Inverse Display
+        if (invert) {
+            i2c_master_write_byte(cmd, CMD_DISPLAY_INVERTED, true); // 0xA7
+        } else {
+            i2c_master_write_byte(cmd, CMD_NORMAL_DISPLAY, true); // 0xA6 (Explicitly normal)
+        }
+
+        // 18. Display ON
+        i2c_master_write_byte(cmd, CMD_DISPLAY_ON, true); // 0xAF
+
+    } else {
+        // === ORIGINAL SSD1306 / SH1106 INIT ===
+        // Note: CTRL_BYTE_CMD_STREAM is already sent above.
+        i2c_master_write_byte(cmd, CMD_SET_CHARGE_PUMP, true);
+        i2c_master_write_byte(cmd, 0x14, true);
+        i2c_master_write_byte(cmd, CMD_SET_SEGMENT_REMAP, true); // This is 0xA1 in original code
+        i2c_master_write_byte(cmd, CMD_SET_COM_SCAN_MODE, true); // This is 0xC8 in original code
+        if (invert) {
+            i2c_master_write_byte(cmd, CMD_DISPLAY_INVERTED, true);
+        }
+        i2c_master_write_byte(cmd, CMD_DISPLAY_ON, true);
     }
 
-    i2c_master_write_byte(cmd, CMD_DISPLAY_ON, true);
     i2c_master_stop(cmd);
+
 
     esp_err_t res = i2c_master_cmd_begin(i2c_num, cmd, 50 / portTICK_PERIOD_MS);
     if (res != ESP_OK) {
