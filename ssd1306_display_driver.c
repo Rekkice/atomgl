@@ -73,7 +73,7 @@
 #define CMD_SET_SEGMENT_REMAP_FLIPPED 0xA1
 #define CMD_SET_COM_SCAN_MODE_FLIPPED 0xC8
 
-#define SSD1315_X_OFFSET 4
+#define CMD_SET_COLUMN_ADDRESS_RANGE        0x21
 
 // TODO: let's change name, since also non SPI display are supported now
 struct SPI
@@ -153,12 +153,12 @@ static void do_update(Context *ctx, term display_list)
                 i2c_master_write_byte(cmd, 0x10, true); // Higher nibble of Column Address 0
             }
             if (spi->is_ssd1315) {
-                // Apply the X_OFFSET for SSD1315
-                uint8_t col_addr_offset = SSD1315_X_OFFSET;
+                // With CMD_SET_COLUMN_ADDRESS_RANGE (0x21) in init,
+                // we just need to reset the pointer to 0.
                 i2c_master_write_byte(cmd, CTRL_BYTE_CMD_SINGLE, true);
-                i2c_master_write_byte(cmd, CMD_SET_COLUMN_ADDR_LOWER | (col_addr_offset & 0x0F), true);
+                i2c_master_write_byte(cmd, CMD_SET_COLUMN_ADDR_LOWER, true); // Lower nibble of Column Address 0
                 i2c_master_write_byte(cmd, CTRL_BYTE_CMD_SINGLE, true);
-                i2c_master_write_byte(cmd, CMD_SET_COLUMN_ADDR_HIGHER | (col_addr_offset >> 4), true);
+                i2c_master_write_byte(cmd, CMD_SET_COLUMN_ADDR_HIGHER, true); // Higher nibble of Column Address 0
             }
             // --- X-OFFSET FIX END ---
             
@@ -272,9 +272,15 @@ static void display_init(Context *ctx, term opts)
         // 5. Set Display Start Line
         i2c_master_write_byte(cmd, CMD_SET_DISPLAY_START_LINE, true); // 0x40 (Start line 0)
 
-        // 6. Set Memory Addressing Mode (Still explicitly setting for robustness, not in u8x8 init seq but good practice)
+        // 6. Set Memory Addressing Mode
         i2c_master_write_byte(cmd, CMD_SET_MEMORY_ADDR_MODE, true); // 0x20
         i2c_master_write_byte(cmd, 0x02, true); // Page Addressing Mode
+
+        // --- NEW: Set Column Address Range (0 to 127) once at init ---
+        i2c_master_write_byte(cmd, CTRL_BYTE_CMD_SINGLE, true); // Send as single command
+        i2c_master_write_byte(cmd, CMD_SET_COLUMN_ADDRESS_RANGE, true); // 0x21
+        i2c_master_write_byte(cmd, 0x00, true); // Start column 0
+        i2c_master_write_byte(cmd, 0x7F, true); // End column 127 (DISPLAY_WIDTH - 1)
 
         // 7. Set Segment Remap (Matching u8x8 value)
         i2c_master_write_byte(cmd, CMD_SET_SEGMENT_REMAP_FLIPPED, true); // 0xA1
