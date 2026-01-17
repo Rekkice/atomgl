@@ -42,6 +42,7 @@
 #define CHAR_WIDTH 8
 
 #define I2C_ADDRESS 0x3C
+#define I2C_CHUNK_SIZE 64
 
 #define CTRL_BYTE_CMD_SINGLE 0x80
 #define CTRL_BYTE_CMD_STREAM 0x00
@@ -134,10 +135,15 @@ static void do_update(Context *ctx, term display_list)
                 i2c_master_write_byte(cmd, 0, true);
             }
 
-            // FIX: Split the 128-byte write into two 64-byte chunks.
-            // This prevents timeouts/buffer overflows that cause "Left half only" issues.
-            i2c_master_write(cmd, out_buf, 64, true);
-            i2c_master_write(cmd, out_buf + 64, 64, true);
+            int offset = 0;
+            while (offset < DISPLAY_WIDTH) {
+                int chunk_len = DISPLAY_WIDTH - offset;
+                if (chunk_len > I2C_CHUNK_SIZE) {
+                    chunk_len = I2C_CHUNK_SIZE;
+                }
+                i2c_master_write(cmd, out_buf + offset, chunk_len, true);
+                offset += chunk_len;
+            }
 
             i2c_master_stop(cmd);
             
@@ -208,9 +214,6 @@ static void display_init(Context *ctx, term opts)
     i2c_master_write_byte(cmd, CTRL_BYTE_CMD_STREAM, true);
 
     if (spi->is_ssd1315) {
-        // SSD1315 Initialization: Robust Timing (Fixes 400kHz artifacts)
-        // Using Default Addressing Mode (NO 0x20 command)
-        
         i2c_master_write_byte(cmd, 0xAE, true);  // Display OFF
         
         i2c_master_write_byte(cmd, 0xD5, true);  // Set Display Clock Divide Ratio / Oscillator Frequency
@@ -226,8 +229,6 @@ static void display_init(Context *ctx, term opts)
         
         i2c_master_write_byte(cmd, 0x8D, true);  // Set Charge Pump
         i2c_master_write_byte(cmd, 0x14, true);  // Enable Charge Pump
-        
-        // REMOVED: 0x20, 0x02 (Page Mode). Let the display use its default (likely Horizontal).
         
         i2c_master_write_byte(cmd, 0xA1, true);  // Set Segment Remap
         i2c_master_write_byte(cmd, 0xC8, true);  // Set COM Scan Mode
