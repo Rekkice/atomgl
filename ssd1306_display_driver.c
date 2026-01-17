@@ -53,28 +53,6 @@
 #define CMD_SET_COM_SCAN_MODE 0xC8
 #define CMD_SET_CHARGE_PUMP 0x8D
 
-#define CMD_DISPLAY_OFF                     0xAE
-#define CMD_SET_DISPLAY_CLOCK_DIV_OSC_FREQ  0xD5
-#define CMD_SET_MULTIPLEX_RATIO             0xA8
-#define CMD_SET_DISPLAY_OFFSET              0xD3
-#define CMD_SET_DISPLAY_START_LINE          0x40
-#define CMD_SET_MEMORY_ADDR_MODE            0x20
-#define CMD_SET_COLUMN_ADDR_LOWER           0x00
-#define CMD_SET_COLUMN_ADDR_HIGHER          0x10
-#define CMD_SET_COM_PINS_HW_CONFIG          0xDA
-#define CMD_SET_CONTRAST_CONTROL            0x81
-#define CMD_SET_PRECHARGE_PERIOD            0xD9
-#define CMD_SET_VCOMH_DESELECT_LEVEL        0xDB
-#define CMD_ENTIRE_DISPLAY_RAM_CONTINUE     0xA4
-#define CMD_NORMAL_DISPLAY                  0xA6
-#define CMD_INTERNAL_IREF_SELECT            0xAD
-#define CMD_SET_PAGE_ADDR                   0xB0
-
-#define CMD_SET_SEGMENT_REMAP_FLIPPED 0xA1
-#define CMD_SET_COM_SCAN_MODE_FLIPPED 0xC8
-
-#define CMD_SET_COLUMN_ADDRESS_RANGE        0x21
-
 // TODO: let's change name, since also non SPI display are supported now
 struct SPI
 {
@@ -138,35 +116,21 @@ static void do_update(Context *ctx, term display_list)
             i2c_master_write_byte(cmd, (I2C_ADDRESS << 1) | I2C_MASTER_WRITE, true);
 
             i2c_master_write_byte(cmd, CTRL_BYTE_CMD_SINGLE, true);
-            i2c_master_write_byte(cmd, CMD_SET_PAGE_ADDR | (ypos / PAGE_HEIGHT), true);
-            
-            // --- X-OFFSET FIX START ---
-            if (spi->is_sh1106) {
-                // For SH1106, 128-pixel displays often start at internal GDDRAM column 2.
-                // So, to have your buffer's column 0 show at the physical screen's column 0,
-                // you would need to set the internal column address to 2.
-                // If your SH1106 works as is with 0x00, 0x10, then it's either not a common SH1106
-                // or your draw_x function somehow compensates. We'll leave it as is if working.
+            i2c_master_write_byte(cmd, 0xB0 | ypos / 8, true); // Set Page Address
+
+            // FIX: Explicitly set Column Addresses to 0 for SSD1315 and SH1106
+            // This prevents the "diagonal" garbage by resetting the X pointer for every new row.
+            if (spi->is_sh1106 || spi->is_ssd1315) {
                 i2c_master_write_byte(cmd, CTRL_BYTE_CMD_SINGLE, true);
-                i2c_master_write_byte(cmd, 0x00, true); // Lower nibble of Column Address 0
+                i2c_master_write_byte(cmd, 0x00, true); // Lower Column Address
                 i2c_master_write_byte(cmd, CTRL_BYTE_CMD_SINGLE, true);
-                i2c_master_write_byte(cmd, 0x10, true); // Higher nibble of Column Address 0
+                i2c_master_write_byte(cmd, 0x10, true); // Higher Column Address
             }
-            if (spi->is_ssd1315) {
-                // With CMD_SET_COLUMN_ADDRESS_RANGE (0x21) in init,
-                // we just need to reset the pointer to 0.
-                i2c_master_write_byte(cmd, CTRL_BYTE_CMD_SINGLE, true);
-                i2c_master_write_byte(cmd, CMD_SET_COLUMN_ADDR_LOWER, true); // Lower nibble of Column Address 0
-                i2c_master_write_byte(cmd, CTRL_BYTE_CMD_SINGLE, true);
-                i2c_master_write_byte(cmd, CMD_SET_COLUMN_ADDR_HIGHER, true); // Higher nibble of Column Address 0
-            }
-            // --- X-OFFSET FIX END ---
-            
+
             i2c_master_write_byte(cmd, CTRL_BYTE_DATA_STREAM, true);
 
+            // SH1106 specific offset padding (it is 132px wide, we center the 128px image)
             if (spi->is_sh1106) {
-                // add 2 empty pages on sh1106 since it can have up to 132 pixels
-                // and 128 pixel screen starts at (2, 0)
                 i2c_master_write_byte(cmd, 0, true);
                 i2c_master_write_byte(cmd, 0, true);
             }
@@ -175,17 +139,8 @@ static void do_update(Context *ctx, term display_list)
                 i2c_master_write_byte(cmd, out_buf[j], true);
             }
 
-            // no need to send the last 2 page, the position will be set on next line again
-            // if (spi->is_sh1106) {
-            //    i2c_master_write_byte(cmd, 0, true);
-            //    i2c_master_write_byte(cmd, 0, true);
-            // }
-
             i2c_master_stop(cmd);
-            esp_err_t res_i2c = i2c_master_cmd_begin(i2c_num, cmd, 10 / portTICK_PERIOD_MS);
-            if (res_i2c != ESP_OK) {
-                 ESP_LOGE(TAG, "I2C write failed for display update: 0x%.2X", res_i2c);
-            }
+            i2c_master_cmd_begin(i2c_num, cmd, 10 / portTICK_PERIOD_MS);
             i2c_cmd_link_delete(cmd);
 
             memset(buf, 0, memsize);
@@ -252,98 +207,60 @@ static void display_init(Context *ctx, term opts)
     i2c_master_write_byte(cmd, CTRL_BYTE_CMD_STREAM, true);
 
     if (spi->is_ssd1315) {
-        // === SSD1315 SPECIFIC INIT (Matching u8x8 driver that works) ===
-
-        // 1. Display OFF (Sleep Mode)
-        i2c_master_write_byte(cmd, CMD_DISPLAY_OFF, true); // 0xAE
-
-        // 2. Set Display Clock Divide Ratio / Oscillator Frequency
-        i2c_master_write_byte(cmd, CMD_SET_DISPLAY_CLOCK_DIV_OSC_FREQ, true); // 0xD5
-        i2c_master_write_byte(cmd, 0x90, true); // Matching u8x8 value (changed from 0x80)
-
-        // 3. Set Multiplex Ratio
-        i2c_master_write_byte(cmd, CMD_SET_MULTIPLEX_RATIO, true); // 0xA8
-        i2c_master_write_byte(cmd, 0x3F, true); // 1/64 duty cycle (for 128x64 display)
-
-        // 4. Set Display Offset
-        i2c_master_write_byte(cmd, CMD_SET_DISPLAY_OFFSET, true); // 0xD3
-        i2c_master_write_byte(cmd, 0x00, true); // No vertical offset
-
-        // 5. Set Display Start Line
-        i2c_master_write_byte(cmd, CMD_SET_DISPLAY_START_LINE, true); // 0x40 (Start line 0)
-
-        // 6. Set Memory Addressing Mode
-        i2c_master_write_byte(cmd, CMD_SET_MEMORY_ADDR_MODE, true); // 0x20
-        i2c_master_write_byte(cmd, 0x02, true); // Page Addressing Mode
-
-        // --- NEW: Set Column Address Range (0 to 127) once at init ---
-        i2c_master_write_byte(cmd, CTRL_BYTE_CMD_SINGLE, true); // Send as single command
-        i2c_master_write_byte(cmd, CMD_SET_COLUMN_ADDRESS_RANGE, true); // 0x21
-        i2c_master_write_byte(cmd, 0x00, true); // Start column 0
-        i2c_master_write_byte(cmd, 0x7F, true); // End column 127 (DISPLAY_WIDTH - 1)
-
-        // 7. Set Segment Remap (Matching u8x8 value)
-        i2c_master_write_byte(cmd, CMD_SET_SEGMENT_REMAP_FLIPPED, true); // 0xA1
-
-        // 8. Set COM Output Scan Direction (Matching u8x8 value)
-        i2c_master_write_byte(cmd, CMD_SET_COM_SCAN_MODE_FLIPPED, true); // 0xC8
-
-        // 9. Set COM Pins Hardware Configuration
-        i2c_master_write_byte(cmd, CMD_SET_COM_PINS_HW_CONFIG, true); // 0xDA
-        i2c_master_write_byte(cmd, 0x12, true); // Alternative COM pin config, disable Left/Right remap
-
-        // 10. Set Contrast Control
-        i2c_master_write_byte(cmd, CMD_SET_CONTRAST_CONTROL, true); // 0x81
-        i2c_master_write_byte(cmd, 0x7F, true); // Mid-range contrast
-
-        // 11. Set Pre-charge Period (Matching u8x8 value)
-        i2c_master_write_byte(cmd, CMD_SET_PRECHARGE_PERIOD, true); // 0xD9
-        i2c_master_write_byte(cmd, 0x22, true); // Matching u8x8 value (changed from 0xF1)
-
-        // 12. Set VCOMH Deselect Level (Matching u8x8 value)
-        i2c_master_write_byte(cmd, CMD_SET_VCOMH_DESELECT_LEVEL, true); // 0xDB
-        i2c_master_write_byte(cmd, 0x30, true); // Matching u8x8 value (changed from 0x20)
-
-        // 13. Internal IREF Selection (SSD1315 SPECIFIC!)
-        i2c_master_write_byte(cmd, CMD_INTERNAL_IREF_SELECT, true); // 0xAD
-        i2c_master_write_byte(cmd, 0x10, true); // Enable internal IREF, 19uA setting
-
-        // 14. Set Charge Pump
-        i2c_master_write_byte(cmd, CMD_SET_CHARGE_PUMP, true); // 0x8D
-        i2c_master_write_byte(cmd, 0x14, true); // Enable charge pump (7.5V setting)
-
-        // 15. Entire Display ON (Resume to GDDRAM content)
-        i2c_master_write_byte(cmd, CMD_ENTIRE_DISPLAY_RAM_CONTINUE, true); // 0xA4
-
-        // 16. Normal / Inverse Display
-        if (invert) {
-            i2c_master_write_byte(cmd, CMD_DISPLAY_INVERTED, true); // 0xA7
-        } else {
-            i2c_master_write_byte(cmd, CMD_NORMAL_DISPLAY, true); // 0xA6 (Explicitly normal)
-        }
-
-        // 17. Display ON
-        i2c_master_write_byte(cmd, CMD_DISPLAY_ON, true); // 0xAF
-
+        // SSD1315 specific initialization sequence (from u8x8 driver)
+        i2c_master_write_byte(cmd, 0xD5, true);  // Set Display Clock Divide Ratio/Oscillator Frequency
+        i2c_master_write_byte(cmd, 0x90, true);  // Divide ratio
+        
+        i2c_master_write_byte(cmd, 0xA8, true);  // Set Multiplex Ratio
+        i2c_master_write_byte(cmd, 0x3F, true);  // 64 MUX
+        
+        i2c_master_write_byte(cmd, 0xD3, true);  // Set Display Offset
+        i2c_master_write_byte(cmd, 0x00, true);  // No offset
+        
+        i2c_master_write_byte(cmd, 0x40, true);  // Set Display Start Line to 0
+        
+        i2c_master_write_byte(cmd, CMD_SET_SEGMENT_REMAP, true);  // 0xA1
+        i2c_master_write_byte(cmd, CMD_SET_COM_SCAN_MODE, true);  // 0xC8
+        
+        i2c_master_write_byte(cmd, 0xDA, true);  // Set COM Pins Hardware Configuration
+        i2c_master_write_byte(cmd, 0x12, true);  // Alternative COM pin config
+        
+        i2c_master_write_byte(cmd, 0x81, true);  // Set Contrast Control
+        i2c_master_write_byte(cmd, 0x7F, true);  // Mid contrast
+        
+        i2c_master_write_byte(cmd, 0xD9, true);  // Set Pre-charge Period
+        i2c_master_write_byte(cmd, 0x22, true);  // Phase 1: 2 DCLKs, Phase 2: 2 DCLKs
+        
+        i2c_master_write_byte(cmd, 0xDB, true);  // Set VCOMH Deselect Level
+        i2c_master_write_byte(cmd, 0x30, true);  // ~0.83 x VCC
+        
+        i2c_master_write_byte(cmd, 0xA4, true);  // Output RAM to display
+        i2c_master_write_byte(cmd, 0xA6, true);  // Normal display mode (not inverted)
+        
+        i2c_master_write_byte(cmd, 0xAD, true);  // Internal IREF Setting
+        i2c_master_write_byte(cmd, 0x10, true);  // Internal Iref
+        
+        i2c_master_write_byte(cmd, CMD_SET_CHARGE_PUMP, true);  // 0x8D
+        i2c_master_write_byte(cmd, 0x14, true);  // Enable charge pump, 7.5V
     } else {
-        // === ORIGINAL SSD1306 / SH1106 INIT ===
-        // Note: CTRL_BYTE_CMD_STREAM is already sent above.
+        // Original SSD1306/SH1106 initialization
         i2c_master_write_byte(cmd, CMD_SET_CHARGE_PUMP, true);
         i2c_master_write_byte(cmd, 0x14, true);
-        i2c_master_write_byte(cmd, CMD_SET_SEGMENT_REMAP_FLIPPED, true); // Assume 0xA1 for SSD1306
-        i2c_master_write_byte(cmd, CMD_SET_COM_SCAN_MODE_FLIPPED, true); // Assume 0xC8 for SSD1306
-        if (invert) {
-            i2c_master_write_byte(cmd, CMD_DISPLAY_INVERTED, true);
-        }
-        i2c_master_write_byte(cmd, CMD_DISPLAY_ON, true);
+
+        i2c_master_write_byte(cmd, CMD_SET_SEGMENT_REMAP, true);
+        i2c_master_write_byte(cmd, CMD_SET_COM_SCAN_MODE, true);
     }
 
-    i2c_master_stop(cmd);
+    if (invert) {
+        i2c_master_write_byte(cmd, CMD_DISPLAY_INVERTED, true);
+    }
 
+    i2c_master_write_byte(cmd, CMD_DISPLAY_ON, true);
+    i2c_master_stop(cmd);
 
     esp_err_t res = i2c_master_cmd_begin(i2c_num, cmd, 50 / portTICK_PERIOD_MS);
     if (res != ESP_OK) {
-        ESP_LOGE(TAG, "ssd1306 OLED configuration failed. error: 0x%.2X", res);
+        ESP_LOGE(TAG, "ssd1306/ssd1315 OLED configuration failed. error: 0x%.2X", res);
     } else {
         xTaskCreate(process_messages, "display", 10000, spi, 1, NULL);
     }
