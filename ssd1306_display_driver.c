@@ -54,12 +54,18 @@
 #define CMD_SET_COM_SCAN_MODE 0xC8
 #define CMD_SET_CHARGE_PUMP 0x8D
 
+typedef enum
+{
+    DISPLAY_SSD1306,
+    DISPLAY_SSD1315,
+    DISPLAY_SH1106,
+} display_type_t;
+
 // TODO: let's change name, since also non SPI display are supported now
 struct SPI
 {
     term i2c_host;
-    bool is_sh1106;
-    bool is_ssd1315;
+    display_type_t type;
     Context *ctx;
 };
 
@@ -117,37 +123,37 @@ static void do_update(Context *ctx, term display_list)
             i2c_master_write_byte(cmd, (I2C_ADDRESS << 1) | I2C_MASTER_WRITE, true);
 
             i2c_master_write_byte(cmd, CTRL_BYTE_CMD_SINGLE, true);
-            i2c_master_write_byte(cmd, 0xB0 | ypos / 8, true); // Set Page Address
+            i2c_master_write_byte(cmd, 0xB0 | ypos / 8, true);
 
-            if (spi->is_sh1106 || spi->is_ssd1315) {
+            if (spi->type == DISPLAY_SH1106 || spi->type == DISPLAY_SSD1315) {
+                // SSD1315 and SH1106 require explicit column address reset
                 i2c_master_write_byte(cmd, CTRL_BYTE_CMD_SINGLE, true);
-                i2c_master_write_byte(cmd, 0x00, true); // Lower Column
+                i2c_master_write_byte(cmd, 0x00, true);
                 i2c_master_write_byte(cmd, CTRL_BYTE_CMD_SINGLE, true);
-                i2c_master_write_byte(cmd, 0x10, true); // Higher Column
+                i2c_master_write_byte(cmd, 0x10, true);
             }
-
             i2c_master_write_byte(cmd, CTRL_BYTE_DATA_STREAM, true);
 
-            if (spi->is_sh1106) {
+
+            if (spi->type == DISPLAY_SH1106) {
                 // add 2 empty pages on sh1106 since it can have up to 132 pixels
                 // and 128 pixel screen starts at (2, 0)
                 i2c_master_write_byte(cmd, 0, true);
                 i2c_master_write_byte(cmd, 0, true);
             }
 
-            int offset = 0;
-            while (offset < DISPLAY_WIDTH) {
-                int chunk_len = DISPLAY_WIDTH - offset;
-                if (chunk_len > I2C_CHUNK_SIZE) {
-                    chunk_len = I2C_CHUNK_SIZE;
-                }
-                i2c_master_write(cmd, out_buf + offset, chunk_len, true);
-                offset += chunk_len;
+            for (uint8_t j = 0; j < DISPLAY_WIDTH; j++) {
+                i2c_master_write_byte(cmd, out_buf[j], true);
             }
 
+            // no need to send the last 2 page, the position will be set on next line again
+            // if (spi->type == DISPLAY_SH1106) {
+            //    i2c_master_write_byte(cmd, 0, true);
+            //    i2c_master_write_byte(cmd, 0, true);
+            // }
+
             i2c_master_stop(cmd);
-            
-            esp_err_t res = i2c_master_cmd_begin(i2c_num, cmd, 100 / portTICK_PERIOD_MS);
+            i2c_master_cmd_begin(i2c_num, cmd, 100 / portTICK_PERIOD_MS);
             i2c_cmd_link_delete(cmd);
 
             memset(buf, 0, memsize);
@@ -179,13 +185,17 @@ static void display_init(Context *ctx, term opts)
     ctx->platform_data = spi;
 
     spi->ctx = ctx;
+    spi->type = DISPLAY_SSD1306; // Default to SSD1306
 
     term compat_value_term = interop_kv_get_value_default(opts, ATOM_STR("\xA", "compatible"), term_nil(), ctx->global);
     int str_ok;
     char *compat_string = interop_term_to_string(compat_value_term, &str_ok);
     if (str_ok && compat_string) {
-        spi->is_sh1106 = !strcmp(compat_string, "sino-wealth,sh1106");
-        spi->is_ssd1315 = !strcmp(compat_string, "solomon-systech,ssd1315");
+        if (!strcmp(compat_string, "sino-wealth,sh1106")) {
+            spi->type = DISPLAY_SH1106;
+        } else if (!strcmp(compat_string, "solomon-systech,ssd1315")) {
+            spi->type = DISPLAY_SSD1315;
+        }
         free(compat_string);
     } else {
         return;
@@ -213,7 +223,7 @@ static void display_init(Context *ctx, term opts)
     i2c_master_write_byte(cmd, (I2C_ADDRESS << 1) | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(cmd, CTRL_BYTE_CMD_STREAM, true);
 
-    if (spi->is_ssd1315) {
+    if (spi->type == DISPLAY_SSD1315) {
         i2c_master_write_byte(cmd, 0xAE, true);  // Display OFF
         
         i2c_master_write_byte(cmd, 0xD5, true);  // Set Display Clock Divide Ratio / Oscillator Frequency
